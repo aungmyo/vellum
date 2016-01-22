@@ -1,0 +1,109 @@
+
+
+the two ends of the spectrum of security of data encrypting keys are: best - HSM, and worst - local keystore in ~tomcat with no password or passwords in the clear
+
+so for STS token generation since the costs of key loss are huge, one definitely wants HSM - where the keys are inaccessible and tamper proof
+
+some months i was trying to create a POC for something inbetween which implementing a crypto server using the standard java stuff - so one has a java CipherSpi - where like with HSM when requesting the cipher to encrypt/decrypt something, the CipherSpi connects via SSL to the crypto server where keys are kept 
+
+and trying to implement things from PCI like 
+
+- dual control and split knowledge 
+- supporting key revisions because PCI says have to revise every year 
+- and of course user management because when users leave company their access must be disabled
+
+one can imagine the crypto server being in a virtual machine which is made a secure as possible and runs nothing else except this - so the security is dependent on the security of the JVM and its SSL impl and crypto libraries (KeyStore et al)
+
+i thought to call it "the virtual enigma machine" or venigma for short ! :)
+
+you see how far i got in this package:
+
+http://code.google.com/p/vellum/source/browse/trunk/src/venigma/server/CipherHandler.java
+
+besides crypto commands ENCIPHER and DECIPHER, there are admin commands like to START, STOP (the machine) , as well as ADD_USER, REVOKE etc
+
+the interesting challenge i was racking my brain over was the split knowledge - and how that works, is 
+
+- the same key is stored in keystore multiple times each with different password comprising two different users passwords 
+- when the machine is "started" - it won't cipher until two authorized users START it with their passwords 
+- so authorized users send START message with their password (over client-auth'ed SSL connection) 
+- when the server has two users passwords, it concatenates them as the key password and loads keys
+- having loaded the key, it can now cipher!
+
+at some stage i wish to finish it off and "release" as opensource project ie. blogging about how it works and where the code is
+
+{{{
+    private void process() throws Exception {
+        this.request = JsonSockets.read(socket, CipherRequest.class);
+        subject = getSubject();
+        responseType = context.requestAuth.auth(request, subject);
+        if (responseType != CipherResponseType.OK) {
+            reply(new CipherResponse(responseType));    
+            return;
+        }
+        if (request.requestType == CipherRequestType.PING) {
+            reply(new CipherResponse(CipherResponseType.PING));
+        } else if (request.requestType == CipherRequestType.CHECK) {
+            reply(check());
+        } else if (request.requestType == CipherRequestType.GENERATE_KEY) {
+            reply(generateKey());
+        } else if (request.requestType == CipherRequestType.ADD_USER) {
+            reply(addUser());
+        } else if (request.requestType == CipherRequestType.GRANT) {
+            reply(grant());
+        } else if (request.requestType == CipherRequestType.REVOKE) {
+            reply(revoke());
+        } else if (request.requestType == CipherRequestType.START) {
+            reply(start());
+        } else if (request.requestType == CipherRequestType.STOP) {
+            reply(stop());
+        } else if (request.requestType == CipherRequestType.ENCIPHER) {
+            if (!context.isStarted()) {
+                reply(new CipherResponse(CipherResponseType.ERROR_NOT_STARTED));
+            } else {
+                reply(encrypt());
+            }
+        } else if (request.requestType == CipherRequestType.DECIPHER) {
+            if (!context.isStarted()) {
+                reply(new CipherResponse(CipherResponseType.ERROR_NOT_STARTED));
+            } else {
+                reply(decrypt());
+            }
+        }
+    }
+}}}
+
+there are three roles - ADMIN, USER, and PROVIDER
+
+http://code.google.com/p/vellum/source/browse/trunk/src/venigma/server/CipherRequestAuth.java
+
+ADMIN and GRANT, REVOKE, ADD users - but a second ADMIN must confirm (dual control)
+
+two users need to contribute part of the password to START the machine (split knowledge)
+
+users and their SSL certs, are stored in database - so the dynamic database-drive trust store 
+
+users are client auth'ed purely by SSL 
+
+the data-encrypting keys themselves could stored in database (KeyStore into bytes, into BLOB) - or just key meta-data eg. revision number, whether key is enabled or not etc
+
+CipherSpi is at heart of it - instead of ciphering (locally) it messages to the server (as role PROVIDER) via SSL connection to do the encryption remotely 
+
+while the client (tomcat) application has SSL key for the CipherSpi to connect to crypto machine - it will get errors on encrypt/decrypt requests - until such time as two users have sent START to provide necessary password halves for the machine to load the key - so cool ! :) 
+
+i must finish it off sometime altho its mostly done - because i think potentially some useful crypto tech !  well i starting the blog series "Enigma Posts" which will present this over time ! altho first article in that series is that off the cuff one about google authenticator :)
+
+http://code.google.com/p/vellum/source/browse/trunk/src/venigma/server/VCipherSpi.java
+
+{{{
+public class VProvider extends java.security.Provider {
+    public static final ProviderContext providerContext  = new ProviderContext();
+    
+    public VProvider() {
+        super("VProvider", 1.0, "Provides KeyStore.JCEKS");
+        put("KeyStore.JCEKS", KeyStoreSpi.class.getName());
+        put("Cipher.AES", VCipherSpi.class.getName());
+    }
+}
+}}}
+

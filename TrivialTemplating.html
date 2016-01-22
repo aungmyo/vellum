@@ -1,0 +1,211 @@
+<p>Notwithstanding the fact that anyone in their right mind (which rules me out) would use Apache Velocity or FreeMarker for templating,  we present a trivial templating helper class, where for instance we have an HTML template as follows to send a confirmation email to a customer.</p>
+<pre>
+<code>
+  <p><span>Hey ${displayName}</span>
+  <p>Your Travelstart reference: <span class="bookingReference">${bookingReference}</span>
+  <table class="travelerTable">
+    <tbody>
+      <tr class="travelerRow">
+        <td>${travelerName}</td>
+      </tr>
+    </tbody>
+  </table>
+</code>
+</pre>
+<p>where the above is used to compose an HTML email, and/or render a PDF document using FlyingSaucer.</p>
+<p>So we invoke the "templating engine" as follows.</p>
+<pre>
+public String generate(String resourceName) {
+    HtmlTemplate template = new HtmlTemplate(getClass().getResourceAsStream(resourceName));
+    template.setProperty("displayName", "Evan");
+    template.setProperty("bookingReference", "555555");
+    template.setProperty("bookingDate", "16 Jul 2010");
+    template.setProperty("amount", "R 1,200.00");
+    template.setProperty("travelerRow", 0, "travelerName", "Evan Summers");
+    template.setProperty("travelerRow", 1, "travelerName", "Tootie Milburn");
+    return template.compose();
+}
+</pre>
+<p>This uses the trivial templating class below to read the HTML template, and substitute the given values into the template, etc.</p>
+<pre>
+public class HtmlTemplate {
+    List<String> lineList = new ArrayList();
+    InputStream inputStream;
+    StringBuilder templateBuilder = new StringBuilder();
+    String trClass = null;
+    StringBuilder rowBuilder = new StringBuilder();
+    String line;
+    EntryList entryList = new EntryList();
+
+    public HtmlTemplate(InputStream inputStream) {
+        this.inputStream = inputStream;
+    }
+
+    public void setProperty(String name, Object value) {
+        entryList.getList().add(new Entry(null, 0, name, value));
+    }
+
+    public void setProperty(String parent, int index, String name, Object value) {
+        entryList.getList().add(new Entry(parent, index, name, value));
+    }
+    ...
+}
+</pre>
+<p>Once the properties to substitute have been given using <tt>setProperty()</tt> above, we invoke <tt>compose()</tt> below, which handles multiple rows by looking for <tt>&lt;tr&gt;</tt> and <tt>&lt;/tr&gt;</tt> elements with the appropriate CSS <tt>class</tt>.</p>
+<pre>
+<code>
+    public String compose() throws Exception {
+        BufferedReader reader = new BufferedReader(new InputStreamReader(inputStream));
+        while (true) {
+            line = reader.readLine();
+            if (line == null) {
+                return templateBuilder.toString();
+            }
+            line += "\n";
+            boolean trClosed = line.trim().equals("</tr>");
+            boolean tableClosed = line.trim().equals("</table>");
+            if (trClass != null) {
+                if (trClosed) {
+                    rowBuilder.append(line);
+                    templateBuilder.append(replaceRow());
+                    rowBuilder.setLength(0);
+                    line = null;
+                } else if (tableClosed) {
+                    trClass = null;
+                } else if (rowBuilder.length() > 0) {
+                    rowBuilder.append(line);
+                    line = null;
+                }
+            } else {
+                trClass = getRow();
+                if (trClass != null) {
+                    rowBuilder.setLength(0);
+                    rowBuilder.append(line);
+                    line = null;
+                }
+            }
+            if (line != null) {
+                templateBuilder.append(replace());
+            }
+        }
+    }
+</code>
+</pre>
+<p>which relies on the following methods to do the donkey-work.</p>
+<pre>
+<code>
+    protected String getRow() {
+        for (String name : entryList.getParentList()) {
+            if (line.indexOf("<tr class=" + name) >= 0) {
+                return name;
+            }
+        }
+        return null;
+    }
+
+    protected String replaceRow() {
+        int size = entryList.getListSize(trClass);
+        StringBuilder builder = new StringBuilder();
+        for (int rowIndex = 0; rowIndex < size; rowIndex++) {
+            builder.append(replaceRow(rowIndex));
+        }
+        return builder.toString();
+    }
+
+    protected String replaceRow(int rowIndex) {
+        StringBuilder builder = new StringBuilder(rowBuilder);
+        Map<String, Object> rowMap = entryList.getMap(trClass, rowIndex);
+        for (String name : rowMap.keySet()) {
+            Object value = rowMap.get(name);
+            String pattern = "${" + name + "}";
+            int index = builder.indexOf(pattern);
+            if (index > 0) {
+                builder.replace(index, index + pattern.length(), value.toString());
+            }
+        }
+        return builder.toString();
+    }
+
+    protected String replace() {
+        Map<String, Object> valueMap = entryList.getMap(0);
+        for (String name : valueMap.keySet()) {
+            Object value = valueMap.get(name);
+            String pattern = "${" + name + "}";
+            int index = line.indexOf(pattern);
+            if (index > 0) {
+                return line.substring(0, index) + value + line.substring(index + pattern.length());
+            }
+        }
+        return line;
+    }
+</code>
+</pre>
+<p>We use the following rough-shod classes to coddle the data to substitute into the template.</p>
+<pre>
+class EntryList {
+    List<Entry> list = new ArrayList();
+
+    public List<Entry> getList() {
+        return list;
+    }
+
+    public int getListSize(String parent) {
+        int maxIndex = 0;
+        for (Entry entry : list) {
+            if (entry.parent != null && entry.parent.equals(parent)) {
+                if (entry.index > maxIndex) {
+                    maxIndex = entry.index;
+                }
+            }
+        }
+        return maxIndex + 1;
+    }
+
+    public Map<String, Object> getMap(String parent, int index) {
+        Map<String, Object> map = new HashMap();
+        for (Entry entry : list) {
+            if (entry.parent != null && entry.parent.equals(parent) && entry.index == index) {
+                map.put(entry.name, entry.value);
+            }
+        }
+        return map;
+    }
+
+    public Map<String, Object> getMap(int index) {
+        Map<String, Object> map = new HashMap();
+        for (Entry entry : list) {
+            if (entry.parent == null && entry.index == index) {
+                map.put(entry.name, entry.value);
+            }
+        }
+        return map;
+    }
+
+    public List<String> getParentList() {
+        List<String> parentList = new ArrayList();
+        for (Entry entry : list) {
+            if (entry.parent != null && !parentList.contains(entry.parent)) {
+                parentList.add(entry.parent);
+            }
+        }
+        return parentList;
+    }
+}
+</pre>
+<p>where the above handles a list of the following tuples, allowing for a <tt>parent</tt> and <tt>index</tt> for rows.</p>
+<pre>
+class Entry {
+    String parent;
+    int index;
+    String name;
+    Object value;
+
+    public Entry(String parent, int index, String name, Object value) {
+        this.parent = parent;
+        this.index = index;
+        this.name = name;
+        this.value = value;
+    }
+}
+</pre>
+<p>But of course one should keep it real with Apache Velocity or FreeMarker. I was just decided to have some trivial coding fun :)</p>
